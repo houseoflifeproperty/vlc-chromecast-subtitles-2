@@ -147,7 +147,9 @@ intf_sys_t::intf_sys_t(vlc_object_t * const p_this, int port, std::string device
  , m_input_eof( false )
  , m_cc_eof( false )
  , m_pace( false )
+ , m_interrupted( false )
  , m_meta( NULL )
+ , m_ctl_thread_interrupt( NULL )
  , m_httpd( httpd_host, port )
  , m_httpd_file(NULL)
  , m_art_url(NULL)
@@ -155,6 +157,7 @@ intf_sys_t::intf_sys_t(vlc_object_t * const p_this, int port, std::string device
  , m_cc_time_date( VLC_TICK_INVALID )
  , m_cc_time( VLC_TICK_INVALID )
  , m_pingRetriesLeft( PING_WAIT_RETRIES )
+ , m_communication( NULL )
 {
     m_communication = new ChromecastCommunication( p_this,
         getHttpStreamPath(), getHttpStreamPort(),
@@ -172,6 +175,8 @@ intf_sys_t::intf_sys_t(vlc_object_t * const p_this, int port, std::string device
     if( unlikely(m_ctl_thread_interrupt == NULL) )
     {
         msg_Err( p_this, "error creating interrupt context" );
+        delete m_communication;
+        m_communication = NULL;
         return;  // Constructor fails gracefully
     }
 
@@ -236,7 +241,8 @@ intf_sys_t::~intf_sys_t()
         }
 
         m_lock.unlock();
-        vlc_interrupt_kill( m_ctl_thread_interrupt );
+        if( m_ctl_thread_interrupt )
+            vlc_interrupt_kill( m_ctl_thread_interrupt );
         vlc_join(m_chromecastThread, NULL);
 
         delete m_communication;

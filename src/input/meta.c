@@ -170,6 +170,11 @@ const char *vlc_meta_GetWithPriority(const vlc_meta_t *meta, vlc_meta_type_t met
     return meta->meta[meta_type].value;
 }
 
+const char *vlc_meta_Get(const vlc_meta_t *meta, vlc_meta_type_t meta_type)
+{
+    return vlc_meta_GetWithPriority(meta, meta_type, NULL);
+}
+
 void vlc_meta_SetExtraWithPriority( vlc_meta_t *m, const char *psz_name, const char *psz_value, vlc_meta_priority_t priority )
 {
     assert( psz_name );
@@ -195,6 +200,10 @@ const char *vlc_meta_GetExtraWithPriority(const vlc_meta_t *m, const char *name,
     return meta_value->value;
 }
 
+const char *vlc_meta_GetExtra(const vlc_meta_t *m, const char *name)
+{
+    return vlc_meta_GetExtraWithPriority(m, name, NULL);
+}
 
 unsigned vlc_meta_GetExtraCount( const vlc_meta_t *m )
 {

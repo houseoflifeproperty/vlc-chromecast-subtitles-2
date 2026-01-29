@@ -742,13 +742,9 @@ static void toJSON_meta(struct serdes_sys *sys, const vlc_meta_t *meta,
         if (serdes_buf_puts(sys, ": ") < 0) {\
             return;\
         } \
-        vlc_meta_priority_t p_##type = VLC_META_PRIORITY_BASIC; \
-        const char *v_##type = vlc_meta_GetWithPriority(meta, vlc_meta_##type,\
-                                                        &p_##type); \
-        assert(p_##type >= VLC_META_PRIORITY_BASIC \
-                && p_##type <= VLC_META_PRIORITY_INBAND); \
+        const char *v_##type = vlc_meta_Get(meta, vlc_meta_##type); \
         json_stringify_first(string, sys, "value", v_##type); \
-        json_stringify_last(number, sys, "priority", p_##type); \
+        json_stringify_last(number, sys, "priority", VLC_META_PRIORITY_BASIC); \
         if (serdes_buf_puts(sys, ", ") < 0) {\
             return;\
         } \

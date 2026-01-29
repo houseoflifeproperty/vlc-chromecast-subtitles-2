@@ -55,7 +55,7 @@ ChromecastCommunication::ChromecastCommunication( vlc_object_t* p_module,
         return;
     }
 
-    msg_Err( m_module, "Connecting to Chromecast at %s:%u", targetIP, devicePort );
+    msg_Dbg( m_module, "Connecting to Chromecast at %s:%u", targetIP, devicePort );
     m_tls = vlc_tls_SocketOpenTLS( m_creds, targetIP, devicePort, "tcps",
                                    NULL, NULL );
     if (m_tls == NULL)
@@ -342,13 +342,13 @@ std::string ChromecastCommunication::GetMedia( const std::string& mime,
             {
                 if( !artist.empty() )
                     ss << ",\"artist\":\"" << artist << "\"";
-                if( album.empty() )
+                if( !album.empty() )
                     ss << ",\"album\":\"" << album << "\"";
-                if( albumartist.empty() )
+                if( !albumartist.empty() )
                     ss << ",\"albumArtist\":\"" << albumartist << "\"";
-                if( tracknumber.empty() )
+                if( !tracknumber.empty() )
                     ss << ",\"trackNumber\":\"" << tracknumber << "\"";
-                if( discnumber.empty() )
+                if( !discnumber.empty() )
                     ss << ",\"discNumber\":\"" << discnumber << "\"";
             }
 
@@ -368,6 +368,21 @@ std::string ChromecastCommunication::GetMedia( const std::string& mime,
        << ",\"streamType\":\"LIVE\""
        << ",\"contentType\":\"" << mime << "\"";
 
+    /* Add WebVTT subtitle track if URL is provided */
+    if( !vttUrl.empty() )
+    {
+        ss << ",\"tracks\":[{"
+           << "\"trackId\":1,"
+           << "\"type\":\"TEXT\","
+           << "\"trackContentId\":\"" << vttUrl << "\","
+           << "\"trackContentType\":\"text/vtt\","
+           << "\"subtype\":\"SUBTITLES\","
+           << "\"name\":\"Subtitles\","
+           << "\"language\":\"en\""
+           << "}]";
+        msg_Dbg( m_module, "Adding subtitle track: %s", vttUrl.c_str() );
+    }
+
     return ss.str();
 }
 
@@ -379,8 +394,13 @@ unsigned ChromecastCommunication::msgPlayerLoad( const std::string& destinationI
     std::stringstream ss;
     ss << "{\"type\":\"LOAD\","
        <<  "\"media\":{" << GetMedia( mime, p_meta, vttUrl ) << "},"
-       <<  "\"autoplay\":\"false\","
-       <<  "\"requestId\":" << id
+       <<  "\"autoplay\":\"false\",";
+    
+    /* Enable subtitle track if VTT URL was provided */
+    if( !vttUrl.empty() )
+        ss << "\"activeTrackIds\":[1],";
+    
+    ss <<  "\"requestId\":" << id
        << "}";
 
     return pushMediaPlayerMessage( destinationId, ss ) == VLC_SUCCESS ? id : kInvalidId;

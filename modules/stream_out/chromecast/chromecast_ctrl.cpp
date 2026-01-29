@@ -154,6 +154,7 @@ intf_sys_t::intf_sys_t(vlc_object_t * const p_this, int port, std::string device
  , m_httpd_file(NULL)
  , m_art_url(NULL)
  , m_art_idx(0)
+ , m_cc_time_last_request_date( VLC_TICK_INVALID )
  , m_cc_time_date( VLC_TICK_INVALID )
  , m_cc_time( VLC_TICK_INVALID )
  , m_pingRetriesLeft( PING_WAIT_RETRIES )

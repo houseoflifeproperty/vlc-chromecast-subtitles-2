@@ -1308,8 +1308,10 @@ static int Open(vlc_object_t *p_this)
     if (httpd_host == NULL)
         goto error;
 
+    msg_Dbg( p_stream, "DEBUG: About to create intf_sys_t" );
     p_intf = new (std::nothrow) intf_sys_t( p_this, i_local_server_port, psz_ip, i_device_port,
                                  httpd_host );
+    msg_Dbg( p_stream, "DEBUG: intf_sys_t created, checking isValid" );
     if( p_intf == NULL || !p_intf->isValid() )
     {
         msg_Err( p_this, "cannot load the Chromecast controller" );

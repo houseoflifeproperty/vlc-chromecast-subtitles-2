@@ -44,9 +44,15 @@
 #define TRANSCODING_VIDEO 0x1
 #define TRANSCODING_AUDIO 0x2
 
+#if 1
+/* TODO: works only with internal spu and transcoding/blending for now */
+#define CC_ENABLE_SPU
+#endif
+
 struct sout_access_out_sys_t
 {
-    sout_access_out_sys_t(httpd_host_t *httpd_host, intf_sys_t * const intf);
+    sout_access_out_sys_t(httpd_host_t *httpd_host, intf_sys_t * const intf,
+                          bool live);
     ~sout_access_out_sys_t();
 
     void clear();
@@ -73,19 +79,25 @@ private:
     block_t           **m_copy_last;
     size_t             m_copy_size;
     bool               m_eof;
+    const bool         m_live;
     std::string        m_mime;
+    bool			   m_first;
 };
 
 struct sout_stream_sys_t
 {
-    sout_stream_sys_t(httpd_host_t *httpd_host, intf_sys_t * const intf, bool has_video, int port)
+    sout_stream_sys_t(httpd_host_t *httpd_host, httpd_host_t *httpd_host_vtt, intf_sys_t * const intf, bool has_video, int port)
         : httpd_host(httpd_host)
-        , access_out_live(httpd_host, intf)
+        , httpd_host_vtt(httpd_host_vtt)
+        , access_out_stream(httpd_host, intf, true)
+        , access_out_vtt(httpd_host_vtt, intf, false)
         , p_out(NULL)
+        , p_spu_out(NULL)
         , p_intf(intf)
         , b_supports_video(has_video)
         , i_port(port)
         , first_video_keyframe_pts( -1 )
+        , first_frame_pts( -1 )
         , es_changed( true )
         , cc_has_input( false )
         , cc_reload( false )
@@ -97,6 +109,8 @@ struct sout_stream_sys_t
         , transcoding_state( TRANSCODING_NONE )
         , venc_opt_idx ( -1 )
         , out_streams_added( 0 )
+        , out_spu_stream( NULL )
+        , m_first_spu_data ( NULL )
     {
         assert(p_intf != NULL);
         vlc_mutex_init(&lock);
@@ -119,10 +133,19 @@ struct sout_stream_sys_t
     void setNextTranscodingState();
     bool transcodingCanFallback() const;
 
+    bool startSoutSpuChain(sout_stream_t* p_stream,
+                           sout_stream_id_sys_t *stream, const std::string &sout);
+    void stopSoutSpuChain(sout_stream_t* p_stream);
+    
+    void fixBlockTS(block_t* p_buffer, bool relative = false);
+
     httpd_host_t      *httpd_host;
-    sout_access_out_sys_t access_out_live;
+    httpd_host_t      *httpd_host_vtt;
+    sout_access_out_sys_t access_out_stream;
+    sout_access_out_sys_t access_out_vtt;
 
     sout_stream_t     *p_out;
+    sout_stream_t     *p_spu_out;
     std::string        mime;
 
     vlc_mutex_t        lock; /* for input events cb */
@@ -133,6 +156,7 @@ struct sout_stream_sys_t
 
     sout_stream_id_sys_t *             video_proxy_id;
     vlc_tick_t                         first_video_keyframe_pts;
+    vlc_tick_t                         first_frame_pts;
 
     bool                               es_changed;
     bool                               cc_has_input;
@@ -147,6 +171,9 @@ struct sout_stream_sys_t
     std::vector<sout_stream_id_sys_t*> streams;
     std::vector<sout_stream_id_sys_t*> out_streams;
     unsigned int                       out_streams_added;
+    unsigned int                       spu_streams_count;
+    sout_stream_id_sys_t              *out_spu_stream;
+    block_t			  				  *m_first_spu_data;
 
 private:
     std::string GetVencOption( sout_stream_t *, vlc_fourcc_t *,
@@ -154,11 +181,14 @@ private:
     std::string GetAcodecOption( sout_stream_t *, vlc_fourcc_t *, const audio_format_t *, int );
     std::string GetVcodecOption( sout_stream_t *, vlc_fourcc_t *, const video_format_t *, int );
     bool UpdateOutput( sout_stream_t * );
+    bool UpdateSPU( sout_stream_t *, const es_format_t *,
+                    sout_stream_id_sys_t * );
 };
 
 struct sout_stream_id_sys_t
 {
     es_format_t           fmt;
+    sout_stream_t         *p_out;
     sout_stream_id_sys_t  *p_sub_id;
     bool                  flushed;
 };
@@ -228,6 +258,53 @@ static const char *const conversion_quality_list_text[] = {
 #define PORT_TEXT N_("Chromecast port")
 #define PORT_LONGTEXT N_("The port used to talk to the Chromecast.")
 
+
+#define OPACITY_LONGTEXT N_("The opacity (inverse of transparency) of the " \
+    "text that will be rendered on the video. 0 = transparent, " \
+    "255 = totally opaque." )
+#define TEXT_COLOR_TEXT N_("Subtitles text color")
+#define TEXT_OPACITY_TEXT N_("Subtitles text opacity")
+#define BG_COLOR_TEXT N_("Subtitles background color")
+#define BG_OPACITY_TEXT N_("Subtitles background opacity")
+#define EGDE_TYPE_TEXT N_("Subtitles edge type")
+#define EGDE_COLOR_TEXT N_("Subtitles edge color")
+#define EGDE_OPACITY_TEXT N_("Subtitles edge opacity")
+#define FONT_FAMILY_TEXT N_("Subtitles font family")
+#define FONT_SCALE_TEXT N_("Subtitles font scale")
+#define FONT_STYLE_TEXT N_("Subtitles font style")
+
+static const int pi_color_values[] = {
+  0x00000000, 0x00808080, 0x00C0C0C0, 0x00FFFFFF, 0x00800000,
+  0x00FF0000, 0x00FF00FF, 0x00FFFF00, 0x00808000, 0x00008000, 0x00008080,
+  0x0000FF00, 0x00800080, 0x00000080, 0x000000FF, 0x0000FFFF };
+
+static const char *const ppsz_color_descriptions[] = {
+  N_("Black"), N_("Gray"), N_("Silver"), N_("White"), N_("Maroon"),
+  N_("Red"), N_("Fuchsia"), N_("Yellow"), N_("Olive"), N_("Green"), N_("Teal"),
+  N_("Lime"), N_("Purple"), N_("Navy"), N_("Blue"), N_("Aqua") };
+  
+static const int pi_edge_type[] = {
+    0, 1, 2, 3, 4
+};
+static const char *const ppsz_edge_type[] = {
+    "NONE", "OUTLINE", "DROP_SHADOW", "RAISED", "DEPRESSED"
+};
+
+static const int pi_font_family[] = {
+    0, 1, 2, 3, 4, 5, 6
+};
+static const char *const ppsz_font_family[] = {
+    "SANS_SERIF", "MONOSPACED_SANS_SERIF", "SERIF", 
+    "MONOSPACED_SERIF", "CASUAL", "CURSIVE", "SMALL_CAPITALS"
+};
+
+static const int pi_font_style[] = {
+    0, 1, 2, 3
+};
+static const char *const ppsz_font_style[] = {
+    "NORMAL", "BOLD", "BOLD_ITALIC", "ITALIC"
+};
+
 /* Fifo size after we tell the demux to pace */
 #define HTTPD_BUFFER_PACE INT64_C(2 * 1024 * 1024) /* 2 MB */
 /* Fifo size after we drop packets (should not happen) */
@@ -251,6 +328,53 @@ vlc_module_begin ()
     add_bool(SOUT_CFG_PREFIX "video", true, NULL, NULL, false)
         change_private()
     add_integer(SOUT_CFG_PREFIX "http-port", HTTP_PORT, HTTP_PORT_TEXT, HTTP_PORT_LONGTEXT, false)
+    
+    add_rgb(SOUT_CFG_PREFIX "spu-text-color", 0x00FFFFFF, TEXT_COLOR_TEXT, NULL, false)
+        change_integer_list( pi_color_values, ppsz_color_descriptions )
+        change_integer_range( 0x000000, 0xFFFFFF )
+        change_safe()
+        
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-text-opacity", 255, 0, 255,
+        TEXT_OPACITY_TEXT, OPACITY_LONGTEXT, false )
+        change_safe()
+    
+    add_rgb(SOUT_CFG_PREFIX "spu-bg-color", 0x00000000, BG_COLOR_TEXT, NULL, false)
+        change_integer_list( pi_color_values, ppsz_color_descriptions )
+        change_integer_range( 0x000000, 0xFFFFFF )
+        change_safe()
+        
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-bg-opacity", 0, 0, 255,
+        BG_OPACITY_TEXT, OPACITY_LONGTEXT, false )
+        change_safe()
+        
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-edge-type", 2, 0, 4,
+        EGDE_TYPE_TEXT, NULL, false )
+        change_integer_list( pi_edge_type, ppsz_edge_type )
+        change_safe()
+        
+    add_rgb(SOUT_CFG_PREFIX "spu-edge-color", 0x00000000, EGDE_COLOR_TEXT, NULL, false)
+        change_integer_list( pi_color_values, ppsz_color_descriptions )
+        change_integer_range( 0x000000, 0xFFFFFF )
+        change_safe()
+        
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-edge-opacity", 255, 0, 255,
+        EGDE_OPACITY_TEXT, OPACITY_LONGTEXT, false )
+        change_safe()
+        
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-font-family", 0, 0, 6,
+        FONT_FAMILY_TEXT, NULL, false )
+        change_integer_list( pi_font_family, ppsz_font_family )
+        change_safe()
+        
+    add_float_with_range( SOUT_CFG_PREFIX "spu-font-scale", 1.1, 0.1, 3.0,
+        FONT_SCALE_TEXT, NULL, false )
+        change_safe()
+    
+    add_integer_with_range( SOUT_CFG_PREFIX "spu-font-style", 0, 0, 3,
+        FONT_STYLE_TEXT, NULL, false )
+        change_integer_list( pi_font_style, ppsz_font_style )
+        change_safe()
+    
     add_obsolete_string(SOUT_CFG_PREFIX "mux")
     add_obsolete_string(SOUT_CFG_PREFIX "mime")
     add_integer(SOUT_CFG_PREFIX "show-perf-warning", 1, PERF_TEXT, PERF_LONGTEXT, true )
@@ -298,16 +422,20 @@ static int ProxySend(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
                      block_t *p_buffer)
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
-    if (p_sys->cc_has_input || p_sys->out_streams_added >= p_sys->out_streams.size())
+    if (p_sys->cc_has_input || p_sys->out_streams_added >= p_sys->out_streams.size() - p_sys->spu_streams_count)
     {
         if (p_sys->has_video)
         {
             // In case of video, the first block must be a keyframe
             if (id == p_sys->video_proxy_id)
             {
+				if (p_sys->first_frame_pts == -1)
+					p_sys->first_frame_pts = p_buffer->i_pts;
                 if (p_sys->first_video_keyframe_pts == -1
-                 && p_buffer->i_flags & BLOCK_FLAG_TYPE_I)
+                 && p_buffer->i_flags & BLOCK_FLAG_TYPE_I){
                     p_sys->first_video_keyframe_pts = p_buffer->i_pts;
+                    p_sys->p_intf->setSoutDelay(p_buffer->i_pts - p_sys->first_frame_pts);
+				}
             }
             else // no keyframe for audio
                 p_buffer->i_flags &= ~BLOCK_FLAG_TYPE_I;
@@ -319,7 +447,8 @@ static int ProxySend(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
                 return VLC_SUCCESS;
             }
         }
-
+        
+        
         int ret = sout_StreamIdSend(p_stream->p_next, id, p_buffer);
         if (ret == VLC_SUCCESS && !p_sys->cc_has_input)
         {
@@ -367,17 +496,27 @@ static int httpd_url_cb(httpd_callback_sys_t *data, httpd_client_t *cl,
 }
 
 sout_access_out_sys_t::sout_access_out_sys_t(httpd_host_t *httpd_host,
-                                             intf_sys_t * const intf)
+                                             intf_sys_t * const intf,
+                                             bool live)
     : m_intf(intf)
     , m_client(NULL)
     , m_header(NULL)
     , m_copy_chain(NULL)
     , m_eof(true)
+    , m_live(live)
+    , m_first(true)
 {
     m_fifo = block_FifoNew();
     if (!m_fifo)
         throw std::runtime_error( "block_FifoNew failed" );
-    m_url = httpd_UrlNew(httpd_host, intf->getHttpStreamPath().c_str(), NULL, NULL);
+    if (live)
+    {
+        m_url = httpd_UrlNew(httpd_host, intf->getHttpStreamPath().c_str(), NULL, NULL);
+    }
+    else
+    {
+        m_url = httpd_UrlNew(httpd_host, intf->getHttpVttPath().c_str(), NULL, NULL);
+    }
     if (m_url == NULL)
     {
         block_FifoRelease(m_fifo);
@@ -455,7 +594,8 @@ void sout_access_out_sys_t::stop()
 {
     vlc_fifo_Lock(m_fifo);
     clearUnlocked();
-    m_intf->setPacing(false);
+    if (m_live)
+        m_intf->setPacing(false);
     m_client = NULL;
     vlc_fifo_Unlock(m_fifo);
     vlc_fifo_Signal(m_fifo);
@@ -467,9 +607,11 @@ void sout_access_out_sys_t::prepare(sout_stream_t *p_stream, const std::string &
 
     vlc_fifo_Lock(m_fifo);
     clearUnlocked();
-    m_intf->setPacing(false);
+    if (m_live)
+        m_intf->setPacing(false);
     m_mime = mime;
     m_eof = false;
+    m_first = true;
     vlc_fifo_Unlock(m_fifo);
 }
 
@@ -498,10 +640,38 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
     }
 
     /* Send data per 512kB minimum */
-    size_t i_min_buffer = 524288;
-    while (m_client && vlc_fifo_GetBytes(m_fifo) < i_min_buffer && !m_eof)
-        vlc_fifo_Wait(m_fifo);
+    size_t i_min_buffer = m_live ? 524288 : 1;
+    int k = 0;
+    while (m_client && vlc_fifo_GetBytes(m_fifo) < i_min_buffer && !m_eof){
+		if (m_live){
+			vlc_fifo_Wait(m_fifo);
+		} else {
+			vlc_fifo_Unlock(m_fifo);
+			msleep( CLOCK_FREQ );
+			vlc_fifo_Lock(m_fifo);
+			k++;
+			if (k == 5)
+				break;
+		}
+	}
+	
 
+    if (!m_live && vlc_fifo_GetBytes(m_fifo) == 0 && !m_eof)
+    {
+		static const char dummy_first[] = "WEBVTT\n\nNOTE .";
+		static const char dummy_generic[] = "NOTE .\n\n";
+		const char* dummy = m_first ? dummy_first : dummy_generic;
+		block_t *p_block = block_Alloc(strlen(dummy));
+		memcpy((char *)p_block->p_buffer, dummy, strlen(dummy));
+		vlc_fifo_QueueUnlocked(m_fifo, p_block);
+		
+    } else {
+		
+		m_first = false;
+	}
+    
+    
+	
     block_t *p_block = NULL;
     if (m_client && vlc_fifo_GetBytes(m_fifo) > 0)
     {
@@ -537,7 +707,7 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
         else
             p_block = p_first;
 
-        if (vlc_fifo_GetBytes(m_fifo) < HTTPD_BUFFER_PACE)
+        if (vlc_fifo_GetBytes(m_fifo) < HTTPD_BUFFER_PACE && m_live)
             m_intf->setPacing(false);
     }
 
@@ -552,6 +722,7 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
         {
             httpd_MsgAdd(answer, "Content-type", "%s", m_mime.c_str());
             httpd_MsgAdd(answer, "Cache-Control", "no-cache");
+            httpd_MsgAdd(answer, "Access-Control-Allow-Origin", "*");
             httpd_MsgAdd(answer, "Connection", "close");
         }
 
@@ -578,8 +749,17 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
     }
     if (!answer->i_body)
         httpd_MsgAdd(answer, "Connection", "close");
+        
+        /*
+    if (!m_live){
+		char* str = (char*) malloc(answer->i_body+1);
+		memcpy(str, answer->p_body, answer->i_body);
+		str[answer->i_body] = 0;
+		fprintf(stderr, "%s\n", str);
+	}*/
 
     vlc_fifo_Unlock(m_fifo);
+
     return VLC_SUCCESS;
 }
 
@@ -609,7 +789,8 @@ ssize_t sout_access_out_sys_t::write(sout_access_out_t *p_access, block_t *p_blo
              * drop the first block in order to make room. The demux filter
              * will be unpaced when the data is read from the httpd thread. */
 
-            m_intf->setPacing(true);
+            if (m_live)
+                m_intf->setPacing(true);
 
             while (vlc_fifo_GetBytes(m_fifo) >= HTTPD_BUFFER_MAX)
             {
@@ -621,7 +802,8 @@ ssize_t sout_access_out_sys_t::write(sout_access_out_t *p_access, block_t *p_blo
         vlc_fifo_QueueUnlocked(m_fifo, p_block);
     }
 
-    m_eof = false;
+    if (m_live)
+        m_eof = false;
 
     vlc_fifo_Unlock(m_fifo);
     vlc_fifo_Signal(m_fifo);
@@ -633,7 +815,8 @@ void sout_access_out_sys_t::close()
 {
     vlc_fifo_Lock(m_fifo);
     m_eof = true;
-    m_intf->setPacing(false);
+    if (m_live)
+        m_intf->setPacing(false);
     vlc_fifo_Unlock(m_fifo);
     vlc_fifo_Signal(m_fifo);
 }
@@ -701,6 +884,7 @@ static sout_stream_id_sys_t *Add(sout_stream_t *p_stream, const es_format_t *p_f
     if (p_sys_id != NULL)
     {
         es_format_Copy( &p_sys_id->fmt, p_fmt );
+        p_sys_id->p_out = NULL;
         p_sys_id->p_sub_id = NULL;
         p_sys_id->flushed = false;
 
@@ -724,20 +908,32 @@ static void DelInternal(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
         {
             if ( p_sys_id->p_sub_id != NULL )
             {
-                sout_StreamIdDel( p_sys->p_out, p_sys_id->p_sub_id );
                 for (std::vector<sout_stream_id_sys_t*>::iterator out_it = p_sys->out_streams.begin();
                      out_it != p_sys->out_streams.end(); )
                 {
                     if (*out_it == id)
                     {
+                        sout_StreamIdDel( p_sys_id->p_out, p_sys_id->p_sub_id );
+
                         p_sys->out_streams.erase(out_it);
                         p_sys->es_changed = reset_config;
                         p_sys->out_force_reload = reset_config;
                         if( p_sys_id->fmt.i_cat == VIDEO_ES )
                             p_sys->has_video = false;
+                        //else if( p_sys_id->fmt.i_cat == SPU_ES )
+                            //p_sys->spu_streams_count--;
                         break;
                     }
                     out_it++;
+                }
+
+                if( id == p_sys->out_spu_stream )
+                {
+                    assert( p_sys->p_spu_out != NULL );
+
+                    p_sys->stopSoutSpuChain( p_stream );
+                    p_sys->access_out_vtt.clear();
+                    p_sys->es_changed = true;
                 }
             }
 
@@ -749,11 +945,13 @@ static void DelInternal(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
         it++;
     }
 
+
     if ( p_sys->out_streams.empty() )
     {
         p_sys->stopSoutChain(p_stream);
         p_sys->p_intf->requestPlayerStop();
-        p_sys->access_out_live.clear();
+        p_sys->access_out_stream.clear();
+        p_sys->access_out_vtt.clear();
         p_sys->transcoding_state = TRANSCODING_NONE;
     }
 }
@@ -811,6 +1009,54 @@ bool sout_stream_sys_t::canDecodeAudio( sout_stream_t *p_stream,
            i_codec == VLC_CODEC_MP3;
 }
 
+void sout_stream_sys_t::stopSoutSpuChain(sout_stream_t *p_stream)
+{
+    (void) p_stream;
+
+    if ( unlikely( p_spu_out != NULL ) )
+    {
+        if ( out_spu_stream->p_sub_id != NULL )
+        {
+            assert( out_spu_stream->p_out == p_spu_out );
+            sout_StreamIdDel( p_spu_out, out_spu_stream->p_sub_id );
+            out_spu_stream->p_sub_id = NULL;
+        }
+        out_spu_stream = NULL;
+        sout_StreamChainDelete( p_spu_out, NULL );
+        p_spu_out = NULL;
+    }
+}
+
+bool sout_stream_sys_t::startSoutSpuChain(sout_stream_t *p_stream,
+                                          sout_stream_id_sys_t *stream,
+                                          const std::string &sout)
+{
+    access_out_vtt.prepare( p_stream, "text/vtt" );
+
+    out_spu_stream = stream;
+    p_spu_out = sout_StreamChainNew( p_stream->p_sout, sout.c_str(), NULL, NULL);
+
+    if (p_spu_out == NULL)
+    {
+        msg_Err(p_stream, "could not create spu sout chain:%s", sout.c_str());
+        out_spu_stream = NULL;
+        access_out_vtt.clear();
+        return false;
+    }
+
+    out_spu_stream->p_sub_id =
+        reinterpret_cast<sout_stream_id_sys_t *>( sout_StreamIdAdd( p_spu_out, &out_spu_stream->fmt ) );
+    if (out_spu_stream->p_sub_id == NULL)
+    {
+        stopSoutSpuChain(p_stream);
+        access_out_vtt.clear();
+        return false;
+    }
+    out_spu_stream->p_out = p_spu_out;
+
+    return true;
+}
+
 void sout_stream_sys_t::stopSoutChain(sout_stream_t *p_stream)
 {
     (void) p_stream;
@@ -821,6 +1067,7 @@ void sout_stream_sys_t::stopSoutChain(sout_stream_t *p_stream)
         {
             if ( out_streams[i]->p_sub_id != NULL )
             {
+                assert( out_streams[i]->p_out == p_out );
                 sout_StreamIdDel( p_out, out_streams[i]->p_sub_id );
                 out_streams[i]->p_sub_id = NULL;
             }
@@ -836,23 +1083,26 @@ bool sout_stream_sys_t::startSoutChain(sout_stream_t *p_stream,
                                        const std::string &sout, int new_transcoding_state)
 {
     stopSoutChain( p_stream );
+    
+    p_intf->resetPauseDelay();
 
     msg_Dbg( p_stream, "Creating chain %s", sout.c_str() );
     cc_has_input = false;
     cc_reload = false;
     first_video_keyframe_pts = -1;
+    first_frame_pts = -1;
     video_proxy_id = NULL;
     has_video = false;
     out_streams = new_streams;
     transcoding_state = new_transcoding_state;
-
-    access_out_live.prepare( p_stream, mime );
+	spu_streams_count = 0; 
+    access_out_stream.prepare( p_stream, mime );
 
     p_out = sout_StreamChainNew( p_stream->p_sout, sout.c_str(), NULL, NULL);
     if (p_out == NULL) {
         msg_Dbg(p_stream, "could not create sout chain:%s", sout.c_str());
         out_streams.clear();
-        access_out_live.clear();
+        access_out_stream.clear();
         return false;
     }
 
@@ -872,6 +1122,9 @@ bool sout_stream_sys_t::startSoutChain(sout_stream_t *p_stream,
         {
             if( p_sys_id->fmt.i_cat == VIDEO_ES )
                 has_video = true;
+            //else if( p_sys_id->fmt.i_cat == SPU_ES )
+                //spu_streams_count++;
+            p_sys_id->p_out = p_out;
             ++it;
         }
     }
@@ -879,7 +1132,7 @@ bool sout_stream_sys_t::startSoutChain(sout_stream_t *p_stream,
     if (out_streams.empty())
     {
         stopSoutChain( p_stream );
-        access_out_live.clear();
+        access_out_stream.clear();
         return false;
     }
 
@@ -1109,6 +1362,26 @@ sout_stream_sys_t::GetAcodecOption( sout_stream_t *p_stream, vlc_fourcc_t *p_cod
     return ssout.str();
 }
 
+bool sout_stream_sys_t::UpdateSPU( sout_stream_t *p_stream,
+                                   const es_format_t *p_es,
+                                   sout_stream_id_sys_t *p_spu_stream )
+{
+    (void) p_es;
+
+    bool enable = false;
+    if( p_spu_stream )
+    {
+        std::stringstream ss_spu_out;
+        ss_spu_out << "transcode{acodec=0,vcodec=0,scodec=wvtt}:"
+                      "std{mux=rawvtt,access=chromecast-http}";
+        enable = startSoutSpuChain( p_stream, p_spu_stream, ss_spu_out.str() );
+    }
+
+    p_intf->setSubtitlesEnabled( enable );
+
+    return true;
+}
+
 bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
 {
     assert( p_stream->p_sys == this );
@@ -1122,8 +1395,10 @@ bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
     vlc_fourcc_t i_codec_video = 0, i_codec_audio = 0;
     const es_format_t *p_original_audio = NULL;
     const es_format_t *p_original_video = NULL;
+    const es_format_t *p_original_spu = NULL;
     bool b_out_streams_changed = false;
     std::vector<sout_stream_id_sys_t*> new_streams;
+    sout_stream_id_sys_t *p_spu_stream = NULL;
 
     for (std::vector<sout_stream_id_sys_t*>::iterator it = streams.begin(); it != streams.end(); ++it)
     {
@@ -1150,11 +1425,28 @@ bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
                              p_es->i_id, (const char*)&p_es->i_codec );
                     canRemux = false;
                 }
-                else if (i_codec_video == 0)
+                else if (i_codec_video == 0)// && !p_original_spu)
                     i_codec_video = p_es->i_codec;
                 p_original_video = p_es;
                 new_streams.push_back(*it);
             }
+#ifdef CC_ENABLE_SPU
+            else if (p_es->i_cat == SPU_ES && p_original_spu == NULL)
+            {
+#if 0
+                msg_Dbg( p_stream, "forcing video transcode because of subtitle '%4.4s'",
+                         (const char*)&p_es->i_codec );
+                canRemux = false;
+                i_codec_video = 0;
+                p_original_spu = p_es;
+                new_streams.push_back(*it);
+#else
+                p_original_spu = p_es;
+                p_spu_stream = *it;
+                continue;
+#endif
+            }
+#endif
             else
                 continue;
             /* TODO: else handle ttml/webvtt */
@@ -1180,8 +1472,9 @@ bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
     }
 
     /* Don't restart sout and CC session if streams didn't change */
+
     if (!out_force_reload && new_streams.size() == out_streams.size() && !b_out_streams_changed)
-        return true;
+        return UpdateSPU( p_stream, p_original_spu, p_spu_stream );
 
     out_force_reload = false;
 
@@ -1222,6 +1515,8 @@ bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
                                       &p_original_video->video, i_quality );
             new_transcoding_state |= TRANSCODING_VIDEO;
         }
+        //if ( p_original_spu )
+            //ssout << "soverlay,";
         ssout << "}:";
     }
 
@@ -1251,8 +1546,12 @@ bool sout_stream_sys_t::UpdateOutput( sout_stream_t *p_stream )
 
     if ( !startSoutChain( p_stream, new_streams, ssout.str(),
                           new_transcoding_state ) )
+    {
         p_intf->requestPlayerStop();
-    return true;
+        return false;
+    }
+
+    return UpdateSPU( p_stream, p_original_spu, p_spu_stream );
 }
 
 sout_stream_id_sys_t *sout_stream_sys_t::GetSubId( sout_stream_t *p_stream,
@@ -1271,6 +1570,9 @@ sout_stream_id_sys_t *sout_stream_sys_t::GetSubId( sout_stream_t *p_stream,
         if ( id == (sout_stream_id_sys_t*) out_streams[i] )
             return out_streams[i]->p_sub_id;
     }
+
+    if (id == out_spu_stream)
+        return out_spu_stream->p_sub_id;
 
     return NULL;
 }
@@ -1299,13 +1601,32 @@ bool sout_stream_sys_t::isFlushing( sout_stream_t *p_stream )
     return false;
 }
 
+void sout_stream_sys_t::fixBlockTS(block_t* p_buffer, bool relative){
+	
+	mtime_t delay = 0;
+	mtime_t pause_delay = p_intf->getPauseDelay();
+	
+	if (pause_delay != VLC_TS_INVALID)
+		delay = pause_delay;
+		
+	if (relative && first_video_keyframe_pts>0)
+		delay += first_video_keyframe_pts;
+	
+	if( p_buffer->i_pts != VLC_TS_INVALID )
+		p_buffer->i_pts -= delay;
+	if( p_buffer->i_dts != VLC_TS_INVALID )
+		p_buffer->i_dts -= delay;
+		
+}
+
 static int Send(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
                 block_t *p_buffer)
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
     vlc_mutex_locker locker(&p_sys->lock);
 
-    if( p_sys->isFlushing( p_stream ) || p_sys->cc_eof )
+    if( p_sys->isFlushing( p_stream ) || 
+		(p_sys->cc_eof && id != p_sys->out_spu_stream) )
     {
         block_Release( p_buffer );
         return VLC_SUCCESS;
@@ -1317,8 +1638,41 @@ static int Send(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
         block_Release( p_buffer );
         return VLC_EGENERIC;
     }
+    if (p_sys->m_first_spu_data && p_sys->first_video_keyframe_pts != -1) {
+		
+		block_t* p_curr = p_sys->m_first_spu_data;
+		while (p_curr){
+			p_sys->fixBlockTS(p_curr, true);
+			
+			block_t* p_next = p_curr->p_next;
+			p_curr->p_next = NULL;
+			
+			sout_StreamIdSend(p_sys->out_spu_stream->p_out, 
+							  p_sys->out_spu_stream->p_sub_id, 
+							  p_curr);
+			
+			p_curr = p_next;
+		}
+            
+		p_sys->m_first_spu_data = NULL;
+	}
+    if( p_sys->out_spu_stream && next_id == p_sys->out_spu_stream->p_sub_id )
+    {
+        if( p_sys->first_video_keyframe_pts == -1 )
+        {
+			block_ChainAppend(&p_sys->m_first_spu_data, p_buffer);
+            //block_ChainRelease( p_buffer );
+            return VLC_SUCCESS;
+        }
+        p_sys->fixBlockTS(p_buffer, true);
+        
+    } else {
+		    
+		p_sys->fixBlockTS(p_buffer);
+	
+	}
 
-    int ret = sout_StreamIdSend(p_sys->p_out, next_id, p_buffer);
+    int ret = sout_StreamIdSend(id->p_out, next_id, p_buffer);
     if (ret != VLC_SUCCESS)
         DelInternal(p_stream, id, false);
 
@@ -1340,8 +1694,10 @@ static void Flush( sout_stream_t *p_stream, sout_stream_id_sys_t *id )
         p_sys->cc_flushing = true;
 
         p_sys->stopSoutChain( p_stream );
+        p_sys->stopSoutSpuChain( p_stream );
 
-        p_sys->access_out_live.stop();
+        p_sys->access_out_stream.stop();
+        p_sys->access_out_vtt.stop();
 
         if (p_sys->cc_has_input)
         {
@@ -1394,10 +1750,12 @@ static int Open(vlc_object_t *p_this)
     intf_sys_t *p_intf = NULL;
     char *psz_ip = NULL;
     httpd_host_t *httpd_host = NULL;
+    httpd_host_t *httpd_host_vtt = NULL;
     bool b_supports_video = true;
     int i_local_server_port;
     int i_device_port;
     std::stringstream ss;
+    CCTextTrackStyle textTrackStyle;
 
     config_ChainParse(p_stream, SOUT_CFG_PREFIX, ppsz_sout_options, p_stream->p_cfg);
 
@@ -1410,6 +1768,17 @@ static int Open(vlc_object_t *p_this)
 
     i_device_port = var_InheritInteger(p_stream, SOUT_CFG_PREFIX "port");
     i_local_server_port = var_InheritInteger(p_stream, SOUT_CFG_PREFIX "http-port");
+    
+    textTrackStyle.text_color = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-text-color" );
+    textTrackStyle.text_alpha = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-text-opacity" );
+    textTrackStyle.bg_color = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-bg-color" );
+    textTrackStyle.bg_alpha = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-bg-opacity" );
+    textTrackStyle.edge_type = ppsz_edge_type[var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-edge-type" )];
+    textTrackStyle.edge_color = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-edge-color" );
+    textTrackStyle.edge_alpha = var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-edge-opacity" );
+    textTrackStyle.font_family = ppsz_font_family[var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-font-family" )];
+    textTrackStyle.font_scale = var_InheritFloat( p_stream, SOUT_CFG_PREFIX "spu-font-scale" );
+    textTrackStyle.font_style = ppsz_font_style[var_InheritInteger( p_stream, SOUT_CFG_PREFIX "spu-font-style" )];
 
     var_Create(p_stream, "http-port", VLC_VAR_INTEGER);
     var_SetInteger(p_stream, "http-port", i_local_server_port);
@@ -1427,11 +1796,16 @@ static int Open(vlc_object_t *p_this)
     var_Destroy(p_stream, "http-no-timeout");
     if (httpd_host == NULL)
         goto error;
+        
+    var_SetInteger(p_stream, "http-port", i_local_server_port+1);
+    httpd_host_vtt = vlc_http_HostNew(VLC_OBJECT(p_stream));
+    if (httpd_host == NULL)
+        goto error;
 
     try
     {
         p_intf = new intf_sys_t( p_this, i_local_server_port, psz_ip, i_device_port,
-                                 httpd_host );
+                                 httpd_host, textTrackStyle );
     }
     catch (const std::runtime_error& err )
     {
@@ -1448,7 +1822,7 @@ static int Open(vlc_object_t *p_this)
 
     try
     {
-        p_sys = new sout_stream_sys_t( httpd_host, p_intf, b_supports_video,
+        p_sys = new sout_stream_sys_t( httpd_host, httpd_host_vtt, p_intf, b_supports_video,
                                                     i_local_server_port );
     }
     catch ( std::exception& ex )
@@ -1485,6 +1859,8 @@ error:
     delete p_intf;
     if (httpd_host)
         httpd_HostDelete(httpd_host);
+    if (httpd_host_vtt)
+        httpd_HostDelete(httpd_host_vtt);
     free(psz_ip);
     delete p_sys;
     return VLC_EGENERIC;
@@ -1505,9 +1881,11 @@ static void Close(vlc_object_t *p_this)
     assert(p_sys->streams.empty() && p_sys->out_streams.empty());
 
     httpd_host_t *httpd_host = p_sys->httpd_host;
+    httpd_host_t *httpd_host_vtt = p_sys->httpd_host_vtt;
     delete p_sys->p_intf;
     delete p_sys;
     /* Delete last since p_intf and p_sys depends on httpd_host */
     httpd_HostDelete(httpd_host);
+    httpd_HostDelete(httpd_host_vtt);
 }
 

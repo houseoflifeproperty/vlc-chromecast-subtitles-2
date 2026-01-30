@@ -15,6 +15,7 @@ libmux_ps_plugin_la_SOURCES = \
 	mux/mpeg/pes.c mux/mpeg/pes.h \
 	mux/mpeg/ps.c mux/mpeg/bits.h
 libmux_wav_plugin_la_SOURCES = mux/wav.c
+libmux_webvtt_plugin_la_SOURCES = mux/muxvtt.c
 
 mux_LTLIBRARIES = \
 	libmux_dummy_plugin.la \
@@ -23,7 +24,8 @@ mux_LTLIBRARIES = \
 	libmux_mp4_plugin.la \
 	libmux_mpjpeg_plugin.la \
 	libmux_ps_plugin.la \
-	libmux_wav_plugin.la
+	libmux_wav_plugin.la \
+	libmux_webvtt_plugin.la
 
 libmux_ogg_plugin_la_SOURCES = mux/ogg.c
 libmux_ogg_plugin_la_CPPFLAGS = $(AM_CPPFLAGS) $(OGG_CFLAGS)

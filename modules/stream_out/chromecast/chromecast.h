@@ -38,6 +38,7 @@
 #include <atomic>
 #include <sstream>
 #include <queue>
+#include <iomanip>
 
 #ifndef PROTOBUF_INLINE_NOT_IN_HEADERS
 # define PROTOBUF_INLINE_NOT_IN_HEADERS 0
@@ -66,6 +67,20 @@ static const std::string NAMESPACE_RECEIVER         = "urn:x-cast:com.google.cas
 
 // Media player Chromecast app id
 #define APP_ID "CC1AD845" // Default media player aka DEFAULT_MEDIA_RECEIVER_APPLICATION_ID
+
+struct CCTextTrackStyle
+{
+	int text_color;
+    int text_alpha;
+    int bg_color;
+    int bg_alpha;
+    const char* edge_type;
+    int edge_color;
+    int edge_alpha;
+    const char* font_family;
+    float font_scale;
+    const char* font_style;
+};
 
 enum States
 {
@@ -99,7 +114,9 @@ class ChromecastCommunication
 public:
     ChromecastCommunication( vlc_object_t* module,
                              std::string serverPath, unsigned int serverPort,
-                             const char* targetIP, unsigned int devicePort );
+                             std::string vttPath,
+                             const char* targetIP, unsigned int devicePort,
+                             CCTextTrackStyle textTrackStyle );
     ~ChromecastCommunication();
     /**
      * @brief disconnect close the connection with the chromecast
@@ -120,7 +137,7 @@ public:
     unsigned msgReceiverClose(const std::string& destinationId);
     unsigned msgAuth();
     unsigned msgPlayerLoad( const std::string& destinationId,
-                            const std::string& mime, const vlc_meta_t *p_meta );
+                            const std::string& mime, const vlc_meta_t *p_meta, bool meta );
     unsigned msgPlayerPlay( const std::string& destinationId, int64_t mediaSessionId );
     unsigned msgPlayerStop( const std::string& destinationId, int64_t mediaSessionId );
     unsigned msgPlayerPause( const std::string& destinationId, int64_t mediaSessionId );
@@ -129,6 +146,8 @@ public:
                             const std::string & currentTime );
     unsigned msgPlayerSetVolume( const std::string& destinationId, int64_t mediaSessionId,
                                  float volume, bool mute);
+    unsigned msgSetSubtitlesEnabled( const std::string& destinationId, int64_t mediaSessionId,
+                                     bool enabled );
     ssize_t receive( uint8_t *p_data, size_t i_size, int i_timeout, bool *pb_timeout );
 
     const std::string getServerIp()
@@ -156,6 +175,8 @@ private:
     std::string m_serverIp;
     const std::string m_serverPath;
     const unsigned m_serverPort;
+    const std::string m_vttPath;
+    CCTextTrackStyle m_textTrackStyle;
 };
 
 /*****************************************************************************
@@ -168,11 +189,14 @@ struct intf_sys_t
         Stop,
     };
     intf_sys_t(vlc_object_t * const p_this, int local_port, std::string device_addr,
-               int device_port, httpd_host_t *);
+               int device_port, httpd_host_t *, CCTextTrackStyle);
     ~intf_sys_t();
 
     void setRetryOnFail(bool);
     void setHasInput(const std::string mime_type = "");
+    void setSubtitlesEnabled(bool enabled);
+    void setSoutDelay(mtime_t delay);
+    mtime_t getSoutDelay();
 
     void setOnInputEventCb(on_input_event_itf on_input_event, void *on_input_event_data);
     void setDemuxEnabled(bool enabled, on_paused_changed_itf on_paused_changed,
@@ -184,10 +208,12 @@ struct intf_sys_t
     int pace();
     void sendInputEvent(enum cc_input_event event, union cc_input_arg arg);
     vlc_tick_t getPauseDelay();
+    void resetPauseDelay();
 
     unsigned int getHttpStreamPort() const;
     std::string getHttpStreamPath() const;
     std::string getHttpArtRoot() const;
+    std::string getHttpVttPath() const;
 
     int httpd_file_fill( uint8_t *psz_request, uint8_t **pp_data, int *pi_data );
     void interrupt_wake_up();
@@ -198,7 +224,7 @@ private:
     bool processMessage(const castchannel::CastMessage &msg);
     void queueMessage( QueueableMessages msg );
 
-    void setPauseState(bool paused);
+    void setPauseState(bool paused, mtime_t delay);
     bool isFinishedPlaying();
     bool isStateError() const;
     bool isStatePlaying() const;
@@ -233,9 +259,11 @@ private:
     static void send_input_event(void *, enum cc_input_event event, union cc_input_arg arg);
     static void set_demux_enabled(void *, bool, on_paused_changed_itf, void *);
 
-    static void set_pause_state(void*, bool paused);
+    static void set_pause_state(void*, bool paused, mtime_t delay);
 
     static void set_meta(void*, vlc_meta_t *p_meta);
+    
+    static mtime_t get_sout_delay(void*);
 
     void prepareHttpArtwork();
 
@@ -275,6 +303,8 @@ private:
     bool m_cc_eof;
     bool m_pace;
     bool m_interrupted;
+    bool m_subtitles_enabled;
+    CCTextTrackStyle m_textTrackStyle;
 
     vlc_meta_t *m_meta;
 
@@ -298,6 +328,8 @@ private:
     vlc_tick_t        m_cc_time_last_request_date;
     vlc_tick_t        m_cc_time_date;
     vlc_tick_t        m_cc_time;
+    vlc_tick_t        m_pause_delay;
+    vlc_tick_t        m_sout_delay;
 
     /* shared structure with the demux-filter */
     chromecast_common      m_common;

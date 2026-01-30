@@ -30,6 +30,23 @@
 #include "../codec/webvtt/webvtt.h"
 #include "../demux/mp4/minibox.h"
 
+/* ATOM definitions for WebVTT boxes (not all defined in libmp4.h for VLC 3.0.22) */
+#ifndef ATOM_vttc
+#define ATOM_vttc VLC_FOURCC( 'v', 't', 't', 'c' )
+#endif
+#ifndef ATOM_vttx
+#define ATOM_vttx VLC_FOURCC( 'v', 't', 't', 'x' )
+#endif
+#ifndef ATOM_payl
+#define ATOM_payl VLC_FOURCC( 'p', 'a', 'y', 'l' )
+#endif
+#ifndef ATOM_iden
+#define ATOM_iden VLC_FOURCC( 'i', 'd', 'e', 'n' )
+#endif
+#ifndef ATOM_sttg
+#define ATOM_sttg VLC_FOURCC( 's', 't', 't', 'g' )
+#endif
+
 /*****************************************************************************
  * Exported prototypes
  *****************************************************************************/

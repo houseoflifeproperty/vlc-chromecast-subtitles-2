@@ -58,6 +58,15 @@ vlc_module_begin ()
         set_subcategory( SUBCAT_INPUT_DEMUX )
         set_callbacks( webvtt_OpenDemuxStream, webvtt_CloseDemux )
         add_shortcut( "webvttstream" )
+#ifdef ENABLE_SOUT
+    add_submodule()
+        set_shortname( "WEBVTT" )
+        set_description( N_("WEBVTT subtitles encoder") )
+        set_capability( "encoder", 101 )
+        set_category( CAT_SOUT )
+        set_subcategory( SUBCAT_SOUT_STREAM )
+        set_callbacks( webvtt_OpenEncoder, webvtt_CloseEncoder )
+#endif
 vlc_module_end ()
 
 struct webvtt_text_parser_t

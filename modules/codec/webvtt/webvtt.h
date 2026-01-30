@@ -23,6 +23,9 @@
 int  webvtt_OpenDecoder   ( vlc_object_t * );
 void webvtt_CloseDecoder  ( vlc_object_t * );
 
+int  webvtt_OpenEncoder   ( vlc_object_t * );
+void webvtt_CloseEncoder  ( vlc_object_t * );
+
 int  webvtt_OpenDemux     ( vlc_object_t * );
 int  webvtt_OpenDemuxStream (vlc_object_t *);
 void webvtt_CloseDemux    ( vlc_object_t * );

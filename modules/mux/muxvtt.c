@@ -277,3 +277,16 @@ static int Mux( sout_mux_t *p_mux )
 
     return VLC_SUCCESS;
 }
+
+/*****************************************************************************
+ * Module descriptor
+ *****************************************************************************/
+vlc_module_begin()
+    set_shortname( "rawvtt" )
+    set_description( N_("Raw WebVTT muxer") )
+    set_capability( "sout mux", 5 )
+    set_category( CAT_SOUT )
+    set_subcategory( SUBCAT_SOUT_MUX )
+    set_callbacks( webvtt_OpenMuxer, webvtt_CloseMuxer )
+    add_shortcut( "rawvtt", "webvtt" )
+vlc_module_end()

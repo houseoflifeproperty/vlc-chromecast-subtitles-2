@@ -1652,4 +1652,5 @@ static const staticentry_t p_list_spu[] = {
         A("ttml"),
 
     B(VLC_CODEC_WEBVTT, "WEBVTT subtitles"),
+        A("wvtt"),
 };

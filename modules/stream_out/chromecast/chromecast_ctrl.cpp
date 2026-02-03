@@ -916,6 +916,13 @@ void intf_sys_t::processMediaMessage( const castchannel::CastMessage& msg )
             {
                 m_mediaSessionId = sessionId;
                 msg_Dbg( m_module, "New mediaSessionId: %" PRId64, m_mediaSessionId );
+
+                /* If subtitles were enabled before LOAD completed, send EDIT_TRACKS_INFO now */
+                if ( m_subtitles_enabled )
+                {
+                    msg_Dbg( m_module, "Enabling subtitles after media session started" );
+                    m_communication->msgSetSubtitlesEnabled( m_appTransportId, m_mediaSessionId, true );
+                }
             }
 
             if (m_request_stop)

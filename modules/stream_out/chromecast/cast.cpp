@@ -39,6 +39,8 @@
 #include <vlc_httpd.h>
 
 #include <cassert>
+#include <cstdlib>
+#include <cstdio>
 
 #define TRANSCODING_NONE 0x0
 #define TRANSCODING_VIDEO 0x1
@@ -627,6 +629,41 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
 {
     if (!answer || !query || !cl)
         return VLC_SUCCESS;
+
+    /* Check for external VTT file (for non-live/subtitle requests) */
+    if (!m_live)
+    {
+        const char* vtt_file = getenv("CHROMECAST_VTT_FILE");
+        if (vtt_file && vtt_file[0] != '\0')
+        {
+            FILE *fp = fopen(vtt_file, "rb");
+            if (fp)
+            {
+                fseek(fp, 0, SEEK_END);
+                long file_size = ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+
+                answer->i_proto  = HTTPD_PROTO_HTTP;
+                answer->i_version= 0;
+                answer->i_type   = HTTPD_MSG_ANSWER;
+                answer->i_status = 200;
+
+                httpd_MsgAdd(answer, "Content-type", "text/vtt");
+                httpd_MsgAdd(answer, "Cache-Control", "no-cache");
+                httpd_MsgAdd(answer, "Access-Control-Allow-Origin", "*");
+                httpd_MsgAdd(answer, "Connection", "close");
+
+                answer->p_body = (uint8_t *) malloc(file_size);
+                if (answer->p_body)
+                {
+                    answer->i_body = fread(answer->p_body, 1, file_size, fp);
+                    answer->i_body_offset = answer->i_body;
+                }
+                fclose(fp);
+                return VLC_SUCCESS;
+            }
+        }
+    }
 
     vlc_fifo_Lock(m_fifo);
 

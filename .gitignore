@@ -55,6 +55,7 @@ install-*
 !extras/package/apple/build.sh
 
 # Ignore additional build artifacts
+Frameworks
 Frameworks/
 bin/
 modules/gui/macosx/UI/*.nib/

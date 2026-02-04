@@ -41,6 +41,101 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
+#include <string>
+#include <sstream>
+#include <vector>
+
+/* Parse VTT timestamp (HH:MM:SS.mmm or MM:SS.mmm) to milliseconds */
+static int64_t parseVttTimestamp(const char* ts)
+{
+    int h = 0, m = 0, s = 0, ms = 0;
+    /* Try HH:MM:SS.mmm format first */
+    if (sscanf(ts, "%d:%d:%d.%d", &h, &m, &s, &ms) == 4)
+        return (int64_t)h * 3600000 + (int64_t)m * 60000 + (int64_t)s * 1000 + ms;
+    /* Try MM:SS.mmm format */
+    if (sscanf(ts, "%d:%d.%d", &m, &s, &ms) == 3)
+        return (int64_t)m * 60000 + (int64_t)s * 1000 + ms;
+    return 0;
+}
+
+/* Format milliseconds to VTT timestamp (HH:MM:SS.mmm) */
+static void formatVttTimestamp(int64_t ms, char* buf, size_t buf_size)
+{
+    if (ms < 0) ms = 0;
+    int h = (int)(ms / 3600000);
+    int m = (int)((ms % 3600000) / 60000);
+    int s = (int)((ms % 60000) / 1000);
+    int msec = (int)(ms % 1000);
+    snprintf(buf, buf_size, "%02d:%02d:%02d.%03d", h, m, s, msec);
+}
+
+/* Adjust VTT content by subtracting start_offset_ms from all timestamps */
+static std::string adjustVttTimestamps(const char* vtt_content, int64_t start_offset_ms)
+{
+    std::stringstream result;
+    std::istringstream input(vtt_content);
+    std::string line;
+    bool header_done = false;
+
+    while (std::getline(input, line))
+    {
+        /* Pass through WEBVTT header and NOTE lines */
+        if (!header_done)
+        {
+            if (line.find("WEBVTT") == 0 || line.empty() || line.find("NOTE") == 0)
+            {
+                result << line << "\n";
+                if (line.find("WEBVTT") == 0)
+                    header_done = true;
+                continue;
+            }
+            header_done = true;
+        }
+
+        /* Check for timestamp line (contains " --> ") */
+        size_t arrow_pos = line.find(" --> ");
+        if (arrow_pos != std::string::npos)
+        {
+            std::string start_ts = line.substr(0, arrow_pos);
+            std::string end_ts = line.substr(arrow_pos + 5);
+            
+            /* Remove any trailing settings after the end timestamp */
+            size_t space_pos = end_ts.find(' ');
+            std::string settings;
+            if (space_pos != std::string::npos)
+            {
+                settings = end_ts.substr(space_pos);
+                end_ts = end_ts.substr(0, space_pos);
+            }
+
+            int64_t start_ms = parseVttTimestamp(start_ts.c_str()) - start_offset_ms;
+            int64_t end_ms = parseVttTimestamp(end_ts.c_str()) - start_offset_ms;
+
+            /* Skip cues that are entirely before current position */
+            if (end_ms < 0)
+            {
+                /* Skip until next empty line (end of cue) */
+                while (std::getline(input, line) && !line.empty()) {}
+                continue;
+            }
+
+            /* Clamp start to 0 if negative */
+            if (start_ms < 0) start_ms = 0;
+
+            char new_start[16], new_end[16];
+            formatVttTimestamp(start_ms, new_start, sizeof(new_start));
+            formatVttTimestamp(end_ms, new_end, sizeof(new_end));
+
+            result << new_start << " --> " << new_end << settings << "\n";
+        }
+        else
+        {
+            result << line << "\n";
+        }
+    }
+    return result.str();
+}
 
 #define TRANSCODING_NONE 0x0
 #define TRANSCODING_VIDEO 0x1
@@ -643,6 +738,25 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
                 long file_size = ftell(fp);
                 fseek(fp, 0, SEEK_SET);
 
+                /* Read the entire VTT file */
+                char* vtt_content = (char*) malloc(file_size + 1);
+                if (!vtt_content)
+                {
+                    fclose(fp);
+                    return VLC_SUCCESS;
+                }
+                size_t bytes_read = fread(vtt_content, 1, file_size, fp);
+                vtt_content[bytes_read] = '\0';
+                fclose(fp);
+
+                /* Check for start time offset */
+                const char* start_time_env = getenv("CHROMECAST_START_TIME_MS");
+                int64_t start_offset_ms = 0;
+                if (start_time_env && start_time_env[0] != '\0')
+                {
+                    start_offset_ms = atoll(start_time_env);
+                }
+
                 answer->i_proto  = HTTPD_PROTO_HTTP;
                 answer->i_version= 0;
                 answer->i_type   = HTTPD_MSG_ANSWER;
@@ -653,13 +767,27 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
                 httpd_MsgAdd(answer, "Access-Control-Allow-Origin", "*");
                 httpd_MsgAdd(answer, "Connection", "close");
 
-                answer->p_body = (uint8_t *) malloc(file_size);
-                if (answer->p_body)
+                if (start_offset_ms > 0)
                 {
-                    answer->i_body = fread(answer->p_body, 1, file_size, fp);
+                    /* Adjust timestamps and serve */
+                    std::string adjusted = adjustVttTimestamps(vtt_content, start_offset_ms);
+                    free(vtt_content);
+
+                    answer->p_body = (uint8_t *) malloc(adjusted.size());
+                    if (answer->p_body)
+                    {
+                        memcpy(answer->p_body, adjusted.c_str(), adjusted.size());
+                        answer->i_body = adjusted.size();
+                        answer->i_body_offset = answer->i_body;
+                    }
+                }
+                else
+                {
+                    /* Serve original content */
+                    answer->p_body = (uint8_t *) vtt_content;
+                    answer->i_body = bytes_read;
                     answer->i_body_offset = answer->i_body;
                 }
-                fclose(fp);
                 return VLC_SUCCESS;
             }
         }

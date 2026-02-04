@@ -53,3 +53,11 @@ build*/
 contrib-*
 install-*
 !extras/package/apple/build.sh
+
+# Ignore additional build artifacts
+Frameworks/
+bin/
+modules/gui/macosx/UI/*.nib/
+modules/stream_out/chromecast/cast_channel.pb.*
+share/macosx/
+modules/codec/webvtt/CSSGrammar.*

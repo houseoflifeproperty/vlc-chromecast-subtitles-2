@@ -126,6 +126,12 @@ int ChromecastCommunication::buildMessage(const std::string & namespace_,
  */
 ssize_t ChromecastCommunication::receive( uint8_t *p_data, size_t i_size, int i_timeout, bool *pb_timeout )
 {
+    if (m_tls == NULL)
+    {
+        msg_Err( m_module, "receive: TLS connection is NULL" );
+        return -1;
+    }
+
     ssize_t i_received = 0;
     struct pollfd ufd[1];
     ufd[0].fd = vlc_tls_GetFD( m_tls );
@@ -496,6 +502,12 @@ unsigned ChromecastCommunication::msgSetSubtitlesEnabled( const std::string& des
  */
 int ChromecastCommunication::sendMessage( const castchannel::CastMessage &msg )
 {
+    if (m_tls == NULL)
+    {
+        msg_Err( m_module, "sendMessage: TLS connection is NULL" );
+        return VLC_EGENERIC;
+    }
+
     int i_size = msg.ByteSize();
     uint8_t *p_data = new(std::nothrow) uint8_t[PACKET_HEADER_LEN + i_size];
     if (p_data == NULL)

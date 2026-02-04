@@ -73,67 +73,97 @@ static void formatVttTimestamp(int64_t ms, char* buf, size_t buf_size)
 /* Adjust VTT content by subtracting start_offset_ms from all timestamps */
 static std::string adjustVttTimestamps(const char* vtt_content, int64_t start_offset_ms)
 {
+    /* Safety checks */
+    if (!vtt_content || vtt_content[0] == '\0')
+        return std::string("WEBVTT\n\n");
+    
+    if (start_offset_ms <= 0)
+        return std::string(vtt_content);
+
     std::stringstream result;
     std::istringstream input(vtt_content);
     std::string line;
-    bool header_done = false;
+    bool in_cue = false;
+    bool skip_cue = false;
+
+    /* Always start with WEBVTT header */
+    result << "WEBVTT\n\n";
 
     while (std::getline(input, line))
     {
-        /* Pass through WEBVTT header and NOTE lines */
-        if (!header_done)
+        /* Skip BOM and WEBVTT header line */
+        if (line.find("WEBVTT") != std::string::npos)
+            continue;
+        
+        /* Skip NOTE lines */
+        if (line.find("NOTE") == 0)
         {
-            if (line.find("WEBVTT") == 0 || line.empty() || line.find("NOTE") == 0)
-            {
-                result << line << "\n";
-                if (line.find("WEBVTT") == 0)
-                    header_done = true;
-                continue;
-            }
-            header_done = true;
+            /* Skip until empty line */
+            while (std::getline(input, line) && !line.empty()) {}
+            continue;
         }
 
         /* Check for timestamp line (contains " --> ") */
         size_t arrow_pos = line.find(" --> ");
-        if (arrow_pos != std::string::npos)
+        if (arrow_pos != std::string::npos && arrow_pos > 0)
         {
             std::string start_ts = line.substr(0, arrow_pos);
-            std::string end_ts = line.substr(arrow_pos + 5);
+            std::string rest = line.substr(arrow_pos + 5);
             
-            /* Remove any trailing settings after the end timestamp */
-            size_t space_pos = end_ts.find(' ');
+            /* Extract end timestamp (before any space/settings) */
+            std::string end_ts;
             std::string settings;
+            size_t space_pos = rest.find(' ');
             if (space_pos != std::string::npos)
             {
-                settings = end_ts.substr(space_pos);
-                end_ts = end_ts.substr(0, space_pos);
+                end_ts = rest.substr(0, space_pos);
+                settings = rest.substr(space_pos);
+            }
+            else
+            {
+                end_ts = rest;
             }
 
-            int64_t start_ms = parseVttTimestamp(start_ts.c_str()) - start_offset_ms;
-            int64_t end_ms = parseVttTimestamp(end_ts.c_str()) - start_offset_ms;
+            int64_t orig_start = parseVttTimestamp(start_ts.c_str());
+            int64_t orig_end = parseVttTimestamp(end_ts.c_str());
+            int64_t adj_start = orig_start - start_offset_ms;
+            int64_t adj_end = orig_end - start_offset_ms;
 
             /* Skip cues that are entirely before current position */
-            if (end_ms < 0)
+            if (adj_end < 0)
             {
-                /* Skip until next empty line (end of cue) */
-                while (std::getline(input, line) && !line.empty()) {}
+                skip_cue = true;
+                in_cue = true;
                 continue;
             }
 
             /* Clamp start to 0 if negative */
-            if (start_ms < 0) start_ms = 0;
+            if (adj_start < 0) adj_start = 0;
 
-            char new_start[16], new_end[16];
-            formatVttTimestamp(start_ms, new_start, sizeof(new_start));
-            formatVttTimestamp(end_ms, new_end, sizeof(new_end));
+            char new_start[32], new_end[32];
+            formatVttTimestamp(adj_start, new_start, sizeof(new_start));
+            formatVttTimestamp(adj_end, new_end, sizeof(new_end));
 
             result << new_start << " --> " << new_end << settings << "\n";
+            in_cue = true;
+            skip_cue = false;
         }
-        else
+        else if (line.empty())
         {
+            /* Empty line marks end of cue */
+            if (in_cue && !skip_cue)
+                result << "\n";
+            in_cue = false;
+            skip_cue = false;
+        }
+        else if (in_cue && !skip_cue)
+        {
+            /* Cue text content */
             result << line << "\n";
         }
+        /* Ignore cue identifiers (lines before timestamp that aren't empty) */
     }
+
     return result.str();
 }
 

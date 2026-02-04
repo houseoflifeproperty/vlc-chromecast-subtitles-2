@@ -61,3 +61,4 @@ modules/gui/macosx/UI/*.nib/
 modules/stream_out/chromecast/cast_channel.pb.*
 share/macosx/
 modules/codec/webvtt/CSSGrammar.*
+modules/codec/webvtt/CSSLexer.c

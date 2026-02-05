@@ -238,6 +238,8 @@ struct sout_stream_sys_t
         , out_streams_added( 0 )
         , out_spu_stream( NULL )
         , m_first_spu_data ( NULL )
+        , m_last_spu_content( NULL )
+        , m_last_spu_size( 0 )
     {
         assert(p_intf != NULL);
         vlc_mutex_init(&lock);
@@ -245,6 +247,7 @@ struct sout_stream_sys_t
 
     ~sout_stream_sys_t()
     {
+        free(m_last_spu_content);
         vlc_mutex_destroy(&lock);
     }
 
@@ -301,6 +304,10 @@ struct sout_stream_sys_t
     unsigned int                       spu_streams_count;
     sout_stream_id_sys_t              *out_spu_stream;
     block_t			  				  *m_first_spu_data;
+    
+    /* SPU deduplication */
+    uint8_t                            *m_last_spu_content;
+    size_t                              m_last_spu_size;
 
 private:
     std::string GetVencOption( sout_stream_t *, vlc_fourcc_t *,
@@ -755,18 +762,39 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
     if (!answer || !query || !cl)
         return VLC_SUCCESS;
 
+    fprintf(stderr, "[CC_HTTP] url_cb called, m_live=%d, body_offset=%zu\n", m_live, answer->i_body_offset);
+
     /* Check for external VTT file (for non-live/subtitle requests) */
     if (!m_live)
     {
         const char* vtt_file = getenv("CHROMECAST_VTT_FILE");
         if (vtt_file && vtt_file[0] != '\0')
         {
+            /* If body_offset > 0, the client already has the file - return empty response
+             * This prevents subtitle stacking from re-serving the same VTT file repeatedly */
+            if (answer->i_body_offset > 0)
+            {
+                fprintf(stderr, "[CC_HTTP] VTT already served (offset=%zu), returning empty\n", answer->i_body_offset);
+                answer->i_proto  = HTTPD_PROTO_HTTP;
+                answer->i_version= 0;
+                answer->i_type   = HTTPD_MSG_ANSWER;
+                answer->i_status = 200;
+                httpd_MsgAdd(answer, "Content-type", "text/vtt");
+                httpd_MsgAdd(answer, "Access-Control-Allow-Origin", "*");
+                answer->p_body = NULL;
+                answer->i_body = 0;
+                return VLC_SUCCESS;
+            }
+
+            fprintf(stderr, "[CC_HTTP] Non-live mode, CHROMECAST_VTT_FILE='%s'\n", vtt_file);
             FILE *fp = fopen(vtt_file, "rb");
             if (fp)
             {
                 fseek(fp, 0, SEEK_END);
                 long file_size = ftell(fp);
                 fseek(fp, 0, SEEK_SET);
+
+                fprintf(stderr, "[CC_HTTP] Serving STATIC VTT file, size=%ld\n", file_size);
 
                 /* Read the entire VTT file */
                 char* vtt_content = (char*) malloc(file_size + 1);
@@ -786,6 +814,7 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
                 {
                     start_offset_ms = atoll(start_time_env);
                 }
+                fprintf(stderr, "[CC_HTTP] start_offset_ms=%" PRId64 "\n", start_offset_ms);
 
                 answer->i_proto  = HTTPD_PROTO_HTTP;
                 answer->i_version= 0;
@@ -803,6 +832,7 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
                     std::string adjusted = adjustVttTimestamps(vtt_content, start_offset_ms);
                     free(vtt_content);
 
+                    fprintf(stderr, "[CC_HTTP] Serving ADJUSTED VTT, size=%zu\n", adjusted.size());
                     answer->p_body = (uint8_t *) malloc(adjusted.size());
                     if (answer->p_body)
                     {
@@ -814,15 +844,21 @@ int sout_access_out_sys_t::url_cb(httpd_client_t *cl, httpd_message_t *answer,
                 else
                 {
                     /* Serve original content */
+                    fprintf(stderr, "[CC_HTTP] Serving ORIGINAL VTT, size=%zu\n", bytes_read);
                     answer->p_body = (uint8_t *) vtt_content;
                     answer->i_body = bytes_read;
                     answer->i_body_offset = answer->i_body;
                 }
                 return VLC_SUCCESS;
             }
+            else
+            {
+                fprintf(stderr, "[CC_HTTP] Failed to open VTT file: %s\n", vtt_file);
+            }
         }
     }
 
+    fprintf(stderr, "[CC_HTTP] Using FIFO mode (live or no VTT file)\n");
     vlc_fifo_Lock(m_fifo);
 
     if (!answer->i_body_offset)
@@ -1563,15 +1599,35 @@ bool sout_stream_sys_t::UpdateSPU( sout_stream_t *p_stream,
 {
     (void) p_es;
 
+    msg_Warn(p_stream, "[CC_SPU] UpdateSPU called, p_spu_stream=%p", (void*)p_spu_stream);
+
     bool enable = false;
     if( p_spu_stream )
     {
-        std::stringstream ss_spu_out;
-        ss_spu_out << "transcode{acodec=0,vcodec=0,scodec=wvtt}:"
-                      "std{mux=rawvtt,access=chromecast-http}";
-        enable = startSoutSpuChain( p_stream, p_spu_stream, ss_spu_out.str() );
+        /* Check if we're using a static VTT file instead of live SPU chain.
+         * The live SPU chain causes subtitle stacking on VLC 3.0.x because
+         * the same subtitle is sent multiple times. When CHROMECAST_VTT_FILE
+         * is set, we skip the live chain and serve the static file directly. */
+        const char* vtt_file = getenv("CHROMECAST_VTT_FILE");
+        msg_Warn(p_stream, "[CC_SPU] CHROMECAST_VTT_FILE env = '%s'", vtt_file ? vtt_file : "(null)");
+        if (vtt_file && vtt_file[0] != '\0')
+        {
+            msg_Warn(p_stream, "[CC_SPU] Using STATIC VTT file, skipping live SPU chain");
+            /* Prepare the VTT access to serve the static file */
+            access_out_vtt.prepare( p_stream, "text/vtt" );
+            enable = true;  /* Subtitles enabled via static file */
+        }
+        else
+        {
+            msg_Warn(p_stream, "[CC_SPU] Using LIVE SPU chain (no VTT file set)");
+            std::stringstream ss_spu_out;
+            ss_spu_out << "transcode{acodec=0,vcodec=0,scodec=wvtt}:"
+                          "std{mux=rawvtt,access=chromecast-http}";
+            enable = startSoutSpuChain( p_stream, p_spu_stream, ss_spu_out.str() );
+        }
     }
 
+    msg_Warn(p_stream, "[CC_SPU] UpdateSPU result: enable=%d", enable);
     p_intf->setSubtitlesEnabled( enable );
 
     return true;
@@ -1820,9 +1876,15 @@ static int Send(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
     sout_stream_sys_t *p_sys = p_stream->p_sys;
     vlc_mutex_locker locker(&p_sys->lock);
 
+    /* DEBUG: Track if this is an SPU block */
+    bool is_spu = (p_sys->out_spu_stream && id == p_sys->out_spu_stream);
+
     if( p_sys->isFlushing( p_stream ) || 
 		(p_sys->cc_eof && id != p_sys->out_spu_stream) )
     {
+        if (is_spu)
+            msg_Warn(p_stream, "[CC_SPU] Send: DROPPED (flushing/eof) pts=%" PRId64 " size=%zu", 
+                     p_buffer->i_pts, p_buffer->i_buffer);
         block_Release( p_buffer );
         return VLC_SUCCESS;
     }
@@ -1830,14 +1892,20 @@ static int Send(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
     sout_stream_id_sys_t *next_id = p_sys->GetSubId( p_stream, id );
     if ( next_id == NULL )
     {
+        if (is_spu)
+            msg_Warn(p_stream, "[CC_SPU] Send: DROPPED (no next_id) pts=%" PRId64 " size=%zu", 
+                     p_buffer->i_pts, p_buffer->i_buffer);
         block_Release( p_buffer );
         return VLC_EGENERIC;
     }
     if (p_sys->m_first_spu_data && p_sys->first_video_keyframe_pts != -1) {
-		
+		msg_Warn(p_stream, "[CC_SPU] Send: Flushing buffered SPU data");
 		block_t* p_curr = p_sys->m_first_spu_data;
+		int count = 0;
 		while (p_curr){
 			p_sys->fixBlockTS(p_curr, true);
+			msg_Warn(p_stream, "[CC_SPU] Send: Buffered SPU #%d pts=%" PRId64 " size=%zu", 
+			         count++, p_curr->i_pts, p_curr->i_buffer);
 			
 			block_t* p_next = p_curr->p_next;
 			p_curr->p_next = NULL;
@@ -1853,18 +1921,45 @@ static int Send(sout_stream_t *p_stream, sout_stream_id_sys_t *id,
 	}
     if( p_sys->out_spu_stream && next_id == p_sys->out_spu_stream->p_sub_id )
     {
-        if( p_sys->first_video_keyframe_pts == -1 )
+        /* SPU deduplication: skip if same content as last subtitle */
+        if( p_sys->m_last_spu_content != NULL &&
+            p_buffer->i_buffer == p_sys->m_last_spu_size &&
+            memcmp( p_buffer->p_buffer, p_sys->m_last_spu_content, p_buffer->i_buffer ) == 0 )
         {
-			block_ChainAppend(&p_sys->m_first_spu_data, p_buffer);
-            //block_ChainRelease( p_buffer );
+            msg_Warn(p_stream, "[CC_SPU] Send: DEDUP SKIP (same content) pts=%" PRId64 " size=%zu", 
+                     p_buffer->i_pts, p_buffer->i_buffer);
+            block_Release( p_buffer );
             return VLC_SUCCESS;
         }
+        
+        /* Store this SPU content for future comparison */
+        free( p_sys->m_last_spu_content );
+        p_sys->m_last_spu_content = (uint8_t*)malloc( p_buffer->i_buffer );
+        if( p_sys->m_last_spu_content )
+        {
+            memcpy( p_sys->m_last_spu_content, p_buffer->p_buffer, p_buffer->i_buffer );
+            p_sys->m_last_spu_size = p_buffer->i_buffer;
+        }
+        else
+        {
+            p_sys->m_last_spu_size = 0;
+        }
+        
+        if( p_sys->first_video_keyframe_pts == -1 )
+        {
+            msg_Warn(p_stream, "[CC_SPU] Send: BUFFERING (no keyframe yet) pts=%" PRId64 " size=%zu", 
+                     p_buffer->i_pts, p_buffer->i_buffer);
+			block_ChainAppend(&p_sys->m_first_spu_data, p_buffer);
+            return VLC_SUCCESS;
+        }
+        
+        msg_Warn(p_stream, "[CC_SPU] Send: SENDING SPU pts=%" PRId64 " dts=%" PRId64 " size=%zu content[0-20]='%.20s'", 
+                 p_buffer->i_pts, p_buffer->i_dts, p_buffer->i_buffer,
+                 p_buffer->i_buffer > 0 ? (char*)p_buffer->p_buffer : "");
         p_sys->fixBlockTS(p_buffer, true);
         
     } else {
-		    
 		p_sys->fixBlockTS(p_buffer);
-	
 	}
 
     int ret = sout_StreamIdSend(id->p_out, next_id, p_buffer);

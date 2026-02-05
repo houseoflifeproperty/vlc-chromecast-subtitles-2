@@ -58,6 +58,9 @@ static int Mux      ( sout_mux_t * );
 struct sout_mux_sys_t
 {
     bool b_header_done;
+    mtime_t i_last_dts;  /* Last subtitle DTS for deduplication */
+    uint8_t *p_last_content;  /* Last subtitle content for content-based deduplication */
+    size_t i_last_content_size;  /* Size of last content */
     const sout_input_t *p_input;
 };
 
@@ -178,6 +181,9 @@ int webvtt_OpenMuxer( vlc_object_t *p_this )
     if( !p_sys )
         return VLC_ENOMEM;
     p_sys->b_header_done = false;
+    p_sys->i_last_dts = VLC_TS_INVALID;
+    p_sys->p_last_content = NULL;
+    p_sys->i_last_content_size = 0;
     p_sys->p_input = NULL;
 
     return VLC_SUCCESS;
@@ -192,6 +198,7 @@ void webvtt_CloseMuxer( vlc_object_t * p_this )
     sout_mux_t *p_mux = (sout_mux_t*)p_this;
     struct sout_mux_sys_t *p_sys = p_mux->p_sys;
 
+    free( p_sys->p_last_content );
     free( p_sys );
 }
 
@@ -240,8 +247,13 @@ static int Mux( sout_mux_t *p_mux )
     sout_input_t *p_input = p_mux->pp_inputs[0];
     block_fifo_t *p_fifo = p_input->p_fifo;
 
+    size_t fifo_count = block_FifoCount( p_fifo );
+    if( fifo_count > 0 )
+        msg_Warn( p_mux, "[CC_VTT_MUX] Mux called, fifo_count=%zu", fifo_count );
+
     if( !p_sys->b_header_done )
     {
+        msg_Warn( p_mux, "[CC_VTT_MUX] Writing WEBVTT header" );
         block_t *p_data = NULL;
         if( p_input->fmt.i_extra > 8 &&
            !memcmp( p_input->fmt.p_extra, "WEBVTT", 6 ) )
@@ -270,9 +282,47 @@ static int Mux( sout_mux_t *p_mux )
     for( size_t i=block_FifoCount( p_fifo ); i > 0; i-- )
     {
         block_t *p_data = block_FifoGet( p_fifo );
+        
+        msg_Warn( p_mux, "[CC_VTT_MUX] Got block: dts=%" PRId64 " pts=%" PRId64 " size=%zu", 
+                  p_data->i_dts, p_data->i_pts, p_data->i_buffer );
+        
+        /* Content-based deduplication: skip if same content as last subtitle */
+        if( p_sys->p_last_content != NULL &&
+            p_data->i_buffer == p_sys->i_last_content_size &&
+            memcmp( p_data->p_buffer, p_sys->p_last_content, p_data->i_buffer ) == 0 )
+        {
+            msg_Warn( p_mux, "[CC_VTT_MUX] DEDUP SKIP (same ISOBMFF content)" );
+            block_Release( p_data );
+            continue;
+        }
+        
+        /* Store this block's content for future comparison */
+        free( p_sys->p_last_content );
+        p_sys->p_last_content = malloc( p_data->i_buffer );
+        if( p_sys->p_last_content )
+        {
+            memcpy( p_sys->p_last_content, p_data->p_buffer, p_data->i_buffer );
+            p_sys->i_last_content_size = p_data->i_buffer;
+        }
+        else
+        {
+            p_sys->i_last_content_size = 0;
+        }
+        
         p_data = UnpackISOBMFF( p_data );
         if( p_data )
+        {
+            /* Log the actual VTT cue being written */
+            char preview[101];
+            size_t preview_len = p_data->i_buffer < 100 ? p_data->i_buffer : 100;
+            memcpy( preview, p_data->p_buffer, preview_len );
+            preview[preview_len] = '\0';
+            /* Replace newlines with spaces for logging */
+            for( size_t j = 0; j < preview_len; j++ )
+                if( preview[j] == '\n' ) preview[j] = '|';
+            msg_Warn( p_mux, "[CC_VTT_MUX] OUTPUT VTT cue: '%s'", preview );
             sout_AccessOutWrite( p_mux->p_access, p_data );
+        }
     }
 
     return VLC_SUCCESS;

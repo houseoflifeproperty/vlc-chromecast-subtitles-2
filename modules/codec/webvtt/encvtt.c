@@ -29,6 +29,9 @@
 #include <vlc_charset.h>
 #include "webvtt.h"
 
+/* Include substext.h for subpicture_updater_sys_t when p_region is NULL */
+#include "../substext.h"
+
 /* VLC 3.0.22 compatibility: bo_size() is not defined in vlc_boxes.h */
 #ifndef bo_size
 #define bo_size(p_bo) ((p_bo)->b ? (p_bo)->b->i_buffer : 0)
@@ -82,10 +85,49 @@ static void WriteText( const char *psz, bo_t *box, char *c_last )
     }
 }
 
+/* Helper to encode text segments into the ISOBMFF box */
+static void EncodeTextSegments( bo_t *box, const text_segment_t *p_segments )
+{
+    char prevchar = '\0';
+    for( const text_segment_t *p_segment = p_segments;
+         p_segment; p_segment = p_segment->p_next )
+    {
+        if( p_segment->psz_text == NULL )
+            continue;
+
+        const text_style_t *style = p_segment->style;
+        if( style && style->i_features )
+        {
+            if( style->i_features & STYLE_HAS_FLAGS )
+            {
+                if( style->i_style_flags & STYLE_BOLD )
+                    bo_add_mem( box, 3, "<b>" );
+                if( style->i_style_flags & STYLE_UNDERLINE )
+                    bo_add_mem( box, 3, "<u>" );
+                if( style->i_style_flags & STYLE_ITALIC )
+                    bo_add_mem( box, 3, "<i>" );
+            }
+        }
+
+        WriteText( p_segment->psz_text, box, &prevchar );
+
+        if( style && style->i_features )
+        {
+            if( style->i_features & STYLE_HAS_FLAGS )
+            {
+                if( style->i_style_flags & STYLE_ITALIC )
+                    bo_add_mem( box, 4, "</i>" );
+                if( style->i_style_flags & STYLE_UNDERLINE )
+                    bo_add_mem( box, 4, "</u>" );
+                if( style->i_style_flags & STYLE_BOLD )
+                    bo_add_mem( box, 4, "</b>" );
+            }
+        }
+    }
+}
+
 static block_t *Encode( encoder_t *p_enc, subpicture_t *p_spu )
 {
-    VLC_UNUSED( p_enc );
-
     if( p_spu == NULL )
         return NULL;
 
@@ -93,103 +135,107 @@ static block_t *Encode( encoder_t *p_enc, subpicture_t *p_spu )
     if( !bo_init( &box, 8 ) )
         return NULL;
 
-    for( subpicture_region_t *p_region = p_spu->p_region;
-                              p_region; p_region = p_region->p_next )
+    /* Check if we have regions (normal case) or need to use updater (subsdec case) */
+    if( p_spu->p_region == NULL && p_spu->updater.p_sys != NULL )
     {
-        if( p_region->fmt.i_chroma != VLC_CODEC_TEXT ||
-            p_region->p_text == NULL ||
-            p_region->p_text->psz_text == NULL )
-            continue;
-
-        size_t i_offset = bo_size( &box );
-
-        bo_add_32be( &box, 0 );
-        bo_add_fourcc( &box, "vttc" );
-
-        /* Payload */
-
-        bo_add_32be( &box, 0 );
-        bo_add_fourcc( &box, "payl" );
-
-        char prevchar = '\0';
-        /* This should already be UTF-8 encoded, so not much effort... */
-        for( const text_segment_t *p_segment = p_region->p_text;
-             p_segment; p_segment = p_segment->p_next )
+        /* subsdec creates subpictures with updater but no regions.
+         * Extract text directly from the updater system. */
+        subpicture_updater_sys_t *p_updt_sys = p_spu->updater.p_sys;
+        
+        for( subpicture_updater_sys_region_t *p_updtregion = &p_updt_sys->region;
+             p_updtregion; p_updtregion = p_updtregion->p_next )
         {
-            if( p_segment->psz_text == NULL )
+            if( p_updtregion->p_segments == NULL )
+                continue;
+            
+            /* Check if there's actual text */
+            bool has_text = false;
+            for( const text_segment_t *seg = p_updtregion->p_segments; seg; seg = seg->p_next )
+            {
+                if( seg->psz_text && seg->psz_text[0] )
+                {
+                    has_text = true;
+                    msg_Warn( p_enc, "[CC_VTT_ENC] Updater text: '%.30s'", seg->psz_text );
+                    break;
+                }
+            }
+            if( !has_text )
                 continue;
 
-            /* VLC 3.0.22: No ruby support (p_ruby is VLC 4.x only) */
-
-            const text_style_t *style = p_segment->style;
-            if( style && style->i_features )
-            {
-                if( style->i_features & STYLE_HAS_FLAGS )
-                {
-                    if( style->i_style_flags & STYLE_BOLD )
-                        bo_add_mem( &box, 3, "<b>" );
-                    if( style->i_style_flags & STYLE_UNDERLINE )
-                        bo_add_mem( &box, 3, "<u>" );
-                    if( style->i_style_flags & STYLE_ITALIC )
-                        bo_add_mem( &box, 3, "<i>" );
-                }
-            }
-
-            WriteText( p_segment->psz_text, &box, &prevchar );
-
-            if( style && style->i_features )
-            {
-                if( style->i_features & STYLE_HAS_FLAGS )
-                {
-                    /* Close tags in reverse order (LIFO) */
-                    if( style->i_style_flags & STYLE_ITALIC )
-                        bo_add_mem( &box, 4, "</i>" );
-                    if( style->i_style_flags & STYLE_UNDERLINE )
-                        bo_add_mem( &box, 4, "</u>" );
-                    if( style->i_style_flags & STYLE_BOLD )
-                        bo_add_mem( &box, 4, "</b>" );
-                }
-            }
-        }
-
-        bo_set_32be( &box, i_offset + 8, bo_size( &box ) - i_offset - 8 );
-
-        /* Settings */
-
-        if( (p_region->i_text_align & (SUBPICTURE_ALIGN_LEFT|SUBPICTURE_ALIGN_RIGHT)) ||
-                (p_region->i_align & SUBPICTURE_ALIGN_TOP) )
-        {
-            size_t i_start = bo_size( &box );
+            size_t i_offset = bo_size( &box );
 
             bo_add_32be( &box, 0 );
-            bo_add_fourcc( &box, "sttg" );
+            bo_add_fourcc( &box, "vttc" );
 
-            if( p_region->i_text_align & SUBPICTURE_ALIGN_LEFT )
-                bo_add_mem( &box, 10, "align:left" );
-            else if( p_region->i_text_align & SUBPICTURE_ALIGN_RIGHT )
-                bo_add_mem( &box, 11, "align:right" );
+            /* Payload */
+            bo_add_32be( &box, 0 );
+            bo_add_fourcc( &box, "payl" );
 
-            if( p_region->i_align & SUBPICTURE_ALIGN_TOP )
-            {
-                float offset = 100.0;
-                if( p_spu->i_original_picture_height > 0 )
-                    offset = offset * p_region->i_y / p_spu->i_original_picture_height;
-                if( bo_size( &box ) != i_start + 8 )
-                    bo_add_8( &box, ' ' );
-                char *psz;
-                int i_printed = us_asprintf( &psz, "line:%2.2f%%", offset );
-                if( i_printed >= 0 )
-                {
-                    if( i_printed > 0 )
-                        bo_add_mem( &box, i_printed, psz );
-                    free( psz );
-                }
-            }
-            bo_set_32be( &box, i_start, bo_size( &box ) - i_start );
+            EncodeTextSegments( &box, p_updtregion->p_segments );
+
+            bo_set_32be( &box, i_offset + 8, bo_size( &box ) - i_offset - 8 );
+            bo_set_32be( &box, i_offset, bo_size( &box ) - i_offset );
         }
+    }
+    else
+    {
+        /* Normal case: regions are already populated */
+        for( subpicture_region_t *p_region = p_spu->p_region;
+                                  p_region; p_region = p_region->p_next )
+        {
+            if( p_region->fmt.i_chroma != VLC_CODEC_TEXT ||
+                p_region->p_text == NULL ||
+                p_region->p_text->psz_text == NULL )
+                continue;
 
+            size_t i_offset = bo_size( &box );
 
-        bo_set_32be( &box, i_offset, bo_size( &box ) - i_offset );
+            bo_add_32be( &box, 0 );
+            bo_add_fourcc( &box, "vttc" );
+
+            /* Payload */
+            bo_add_32be( &box, 0 );
+            bo_add_fourcc( &box, "payl" );
+
+            EncodeTextSegments( &box, p_region->p_text );
+
+            bo_set_32be( &box, i_offset + 8, bo_size( &box ) - i_offset - 8 );
+
+            /* Settings */
+            if( (p_region->i_text_align & (SUBPICTURE_ALIGN_LEFT|SUBPICTURE_ALIGN_RIGHT)) ||
+                    (p_region->i_align & SUBPICTURE_ALIGN_TOP) )
+            {
+                size_t i_start = bo_size( &box );
+
+                bo_add_32be( &box, 0 );
+                bo_add_fourcc( &box, "sttg" );
+
+                if( p_region->i_text_align & SUBPICTURE_ALIGN_LEFT )
+                    bo_add_mem( &box, 10, "align:left" );
+                else if( p_region->i_text_align & SUBPICTURE_ALIGN_RIGHT )
+                    bo_add_mem( &box, 11, "align:right" );
+
+                if( p_region->i_align & SUBPICTURE_ALIGN_TOP )
+                {
+                    float offset = 100.0;
+                    if( p_spu->i_original_picture_height > 0 )
+                        offset = offset * p_region->i_y / p_spu->i_original_picture_height;
+                    if( bo_size( &box ) != i_start + 8 )
+                        bo_add_8( &box, ' ' );
+                    char *psz;
+                    int i_printed = us_asprintf( &psz, "line:%2.2f%%", offset );
+                    if( i_printed >= 0 )
+                    {
+                        if( i_printed > 0 )
+                            bo_add_mem( &box, i_printed, psz );
+                        free( psz );
+                    }
+                }
+                bo_set_32be( &box, i_start, bo_size( &box ) - i_start );
+            }
+
+            bo_set_32be( &box, i_offset, bo_size( &box ) - i_offset );
+        }
     }
 
     if( bo_size( &box ) == 0 ) /* No cue */

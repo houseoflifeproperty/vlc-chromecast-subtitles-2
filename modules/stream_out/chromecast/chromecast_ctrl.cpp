@@ -120,6 +120,7 @@ intf_sys_t::intf_sys_t(vlc_object_t * const p_this, int port, std::string device
  , m_cc_time( VLC_TICK_INVALID )
  , m_pause_delay( VLC_TICK_INVALID )
  , m_sout_delay( 0 )
+ , m_first_keyframe_pts( -1 )
  , m_pingRetriesLeft( PING_WAIT_RETRIES )
 {
     m_communication = new ChromecastCommunication( p_this,
@@ -579,6 +580,20 @@ mtime_t intf_sys_t::getSoutDelay()
     vlc_mutex_locker locker(&m_lock);
 
     return m_sout_delay;
+}
+
+void intf_sys_t::setFirstKeyframePts( mtime_t pts )
+{
+    vlc_mutex_locker locker(&m_lock);
+
+    m_first_keyframe_pts = pts;
+}
+
+mtime_t intf_sys_t::getFirstKeyframePts()
+{
+    vlc_mutex_locker locker(&m_lock);
+
+    return m_first_keyframe_pts;
 }
 
 /**

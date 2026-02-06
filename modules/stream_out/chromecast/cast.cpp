@@ -213,11 +213,11 @@ private:
 
 struct sout_stream_sys_t
 {
-    sout_stream_sys_t(httpd_host_t *httpd_host, httpd_host_t *httpd_host_vtt, intf_sys_t * const intf, bool has_video, int port)
+    /* Single HTTP host for both stream and VTT (matching Windows DLL architecture) */
+    sout_stream_sys_t(httpd_host_t *httpd_host, intf_sys_t * const intf, bool has_video, int port)
         : httpd_host(httpd_host)
-        , httpd_host_vtt(httpd_host_vtt)
-        , access_out_stream(httpd_host, intf, true)
-        , access_out_vtt(httpd_host_vtt, intf, false)
+        , access_out_stream(httpd_host, intf, true)   /* live=true -> /stream path */
+        , access_out_vtt(httpd_host, intf, false)     /* live=false -> /web.vtt path, SAME host */
         , p_out(NULL)
         , p_spu_out(NULL)
         , p_intf(intf)
@@ -270,7 +270,6 @@ struct sout_stream_sys_t
     void fixBlockTS(block_t* p_buffer, bool relative = false);
 
     httpd_host_t      *httpd_host;
-    httpd_host_t      *httpd_host_vtt;
     sout_access_out_sys_t access_out_stream;
     sout_access_out_sys_t access_out_vtt;
 
@@ -2040,7 +2039,6 @@ static int Open(vlc_object_t *p_this)
     intf_sys_t *p_intf = NULL;
     char *psz_ip = NULL;
     httpd_host_t *httpd_host = NULL;
-    httpd_host_t *httpd_host_vtt = NULL;
     bool b_supports_video = true;
     int i_local_server_port;
     int i_device_port;
@@ -2086,11 +2084,6 @@ static int Open(vlc_object_t *p_this)
     var_Destroy(p_stream, "http-no-timeout");
     if (httpd_host == NULL)
         goto error;
-        
-    var_SetInteger(p_stream, "http-port", i_local_server_port+1);
-    httpd_host_vtt = vlc_http_HostNew(VLC_OBJECT(p_stream));
-    if (httpd_host == NULL)
-        goto error;
 
     try
     {
@@ -2112,7 +2105,8 @@ static int Open(vlc_object_t *p_this)
 
     try
     {
-        p_sys = new sout_stream_sys_t( httpd_host, httpd_host_vtt, p_intf, b_supports_video,
+        /* Single HTTP host for both stream and VTT (matching Windows DLL) */
+        p_sys = new sout_stream_sys_t( httpd_host, p_intf, b_supports_video,
                                                     i_local_server_port );
     }
     catch ( std::exception& ex )
@@ -2149,8 +2143,6 @@ error:
     delete p_intf;
     if (httpd_host)
         httpd_HostDelete(httpd_host);
-    if (httpd_host_vtt)
-        httpd_HostDelete(httpd_host_vtt);
     free(psz_ip);
     delete p_sys;
     return VLC_EGENERIC;
@@ -2171,11 +2163,9 @@ static void Close(vlc_object_t *p_this)
     assert(p_sys->streams.empty() && p_sys->out_streams.empty());
 
     httpd_host_t *httpd_host = p_sys->httpd_host;
-    httpd_host_t *httpd_host_vtt = p_sys->httpd_host_vtt;
     delete p_sys->p_intf;
     delete p_sys;
     /* Delete last since p_intf and p_sys depends on httpd_host */
     httpd_HostDelete(httpd_host);
-    httpd_HostDelete(httpd_host_vtt);
 }
 

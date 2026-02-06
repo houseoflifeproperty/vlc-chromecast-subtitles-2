@@ -358,7 +358,8 @@ std::string ChromecastCommunication::GetMedia( const std::string& mime,
     stream_url << "http://" << m_serverIp << ":" << m_serverPort << m_serverPath;
 
     std::stringstream vtt_url;
-    vtt_url << "http://" << m_serverIp << ":" << (m_serverPort+1) << m_vttPath;
+    /* VTT uses same port as stream (matching Windows DLL architecture) */
+    vtt_url << "http://" << m_serverIp << ":" << m_serverPort << m_vttPath;
 
     msg_Dbg( m_module, "s_stream_url: %s", stream_url.str().c_str());
 

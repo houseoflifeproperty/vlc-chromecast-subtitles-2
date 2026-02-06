@@ -197,6 +197,8 @@ struct intf_sys_t
     void setSubtitlesEnabled(bool enabled);
     void setSoutDelay(mtime_t delay);
     mtime_t getSoutDelay();
+    void setFirstKeyframePts(mtime_t pts);
+    mtime_t getFirstKeyframePts();
 
     void setOnInputEventCb(on_input_event_itf on_input_event, void *on_input_event_data);
     void setDemuxEnabled(bool enabled, on_paused_changed_itf on_paused_changed,
@@ -330,6 +332,7 @@ private:
     vlc_tick_t        m_cc_time;
     vlc_tick_t        m_pause_delay;
     vlc_tick_t        m_sout_delay;
+    vlc_tick_t        m_first_keyframe_pts;
 
     /* shared structure with the demux-filter */
     chromecast_common      m_common;
